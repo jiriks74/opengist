@@ -64,7 +64,7 @@ func truncateCommandOutput(out io.Reader, maxBytes int64) (string, bool, error) 
 }
 
 func parseLog(out io.Reader, maxBytes int) []*Commit {
-	scanner := bufio.NewScanner(out)
+	reader := bufio.NewReader(out)
 
 	var commits []*Commit
 	var currentCommit *Commit
@@ -74,33 +74,37 @@ func parseLog(out io.Reader, maxBytes int) []*Commit {
 	scanNext := true
 
 	for {
-		if scanNext && !scanner.Scan() {
+		line, err := reader.ReadString('\n')
+		if scanNext && err == io.EOF {
 			break
 		}
 		scanNext = true
 
 		// new commit found
 		currentFile = nil
-		currentCommit = &Commit{Hash: string(scanner.Bytes()[2:]), Files: []File{}}
+		currentCommit = &Commit{Hash: line[2:], Files: []File{}}
 
-		scanner.Scan()
-		currentCommit.AuthorName = string(scanner.Bytes()[2:])
+		line, _ = reader.ReadString('\n')
+		line = line[:len(line)-1]
+		currentCommit.AuthorName = line[2:]
 
-		scanner.Scan()
-		currentCommit.AuthorEmail = string(scanner.Bytes()[2:])
+		line, _ = reader.ReadString('\n')
+		line = line[:len(line)-1]
+		currentCommit.AuthorEmail = line[2:]
 
-		scanner.Scan()
-		currentCommit.Timestamp = string(scanner.Bytes()[2:])
+		line, _ = reader.ReadString('\n')
+		line = line[:len(line)-1]
+		currentCommit.Timestamp = line[2:]
 
-		scanner.Scan()
-
-		if len(scanner.Bytes()) == 0 {
+		line, _ = reader.ReadString('\n')
+		line = line[:len(line)-1]
+		if line == "" {
 			commits = append(commits, currentCommit)
 			break
 		}
 
 		// if there is no shortstat, it means that the commit is empty, we add it and move onto the next one
-		if scanner.Bytes()[0] != ' ' {
+		if line[0] != ' ' {
 			commits = append(commits, currentCommit)
 
 			// avoid scanning the next line, as we already did it
@@ -108,19 +112,22 @@ func parseLog(out io.Reader, maxBytes int) []*Commit {
 			continue
 		}
 
-		changed := scanner.Bytes()[1:]
+		changed := []byte(line)[1:]
 		changed = bytes.ReplaceAll(changed, []byte("(+)"), []byte(""))
 		changed = bytes.ReplaceAll(changed, []byte("(-)"), []byte(""))
 		currentCommit.Changed = string(changed)
 
 		// twice because --shortstat adds a new line
-		scanner.Scan()
-		scanner.Scan()
+		line, _ = reader.ReadString('\n')
+		line = line[:len(line)-1]
+		line, _ = reader.ReadString('\n')
+		line = line[:len(line)-1]
+
 		// commit header parsed
 
 		// files changes inside the commit
 		for {
-			line := scanner.Bytes()
+			// line := reader.Bytes()
 
 			// end of content of file
 			if len(line) == 0 {
@@ -132,7 +139,7 @@ func parseLog(out io.Reader, maxBytes int) []*Commit {
 			}
 
 			// new file found
-			if bytes.HasPrefix(line, []byte("diff --git")) {
+			if bytes.HasPrefix([]byte(line), []byte("diff --git")) {
 				// current file is finished, we can add it to the commit
 				if currentFile != nil {
 					currentCommit.Files = append(currentCommit.Files, *currentFile)
@@ -150,15 +157,16 @@ func parseLog(out io.Reader, maxBytes int) []*Commit {
 						currentFile.OldFilename = matches[1]
 					}
 				}
-				scanner.Scan()
+				line, _ = reader.ReadString('\n')
+				line = line[:len(line)-1]
 				continue
 			}
 
-			if bytes.HasPrefix(line, []byte("new")) {
+			if bytes.HasPrefix([]byte(line), []byte("new")) {
 				currentFile.IsCreated = true
 			}
 
-			if bytes.HasPrefix(line, []byte("deleted")) {
+			if bytes.HasPrefix([]byte(line), []byte("deleted")) {
 				currentFile.IsDeleted = true
 			}
 
@@ -178,7 +186,10 @@ func parseLog(out io.Reader, maxBytes int) []*Commit {
 				}
 			}
 
-			scanner.Scan()
+			line, _ = reader.ReadString('\n')
+			if len(line) > 0 && (line[len(line)-1] == '\n' || line[len(line)-1] == '\r') {
+				line = line[:len(line)-1]
+			}
 		}
 
 		commits = append(commits, currentCommit)
