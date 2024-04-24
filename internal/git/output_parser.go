@@ -134,7 +134,7 @@ loopCommits:
 					}
 					switch {
 					case strings.HasPrefix(line, "diff --git"):
-						break loopDiff
+						break currFileLoop
 					case strings.HasPrefix(line, "old mode"):
 					case strings.HasPrefix(line, "new mode"):
 					case strings.HasPrefix(line, "index"):
@@ -180,7 +180,60 @@ loopCommits:
 	return commits, nil
 }
 
-func parseHunks()
+func parseHunks(currentFile *File, maxLines, maxBytes int, input *bufio.Reader) (lineBytes []byte, isFragment bool, err error) {
+	sb := &strings.Builder{}
+	var currFileLineCount int
+
+	lastLeftIdx := -1
+	leftLine, rightLine := 1, 1
+
+	for {
+		for isFragment {
+			currentFile.Truncated = true
+
+			// Read the next line
+			_, isFragment, err = input.ReadLine()
+			if err != nil {
+				return nil, false, err
+			}
+		}
+
+		sb.Reset()
+
+		// Read the next line
+		lineBytes, isFragment, err = input.ReadLine()
+		if err != nil {
+			if err == io.EOF {
+				return lineBytes, false, err
+			}
+			return nil, false, err
+		}
+		if lineBytes[0] == 'd' {
+			return lineBytes, isFragment, err
+		}
+
+		switch lineBytes[0] {
+		case '@':
+			if maxLines > -1 && currFileLineCount >= maxLines {
+				currentFile.Truncated = true
+				continue
+			}
+
+			_, _ = sb.Write(lineBytes)
+			for isFragment {
+				lineBytes, isFragment, err = input.ReadLine()
+				if err != nil {
+					return nil, false, err
+				}
+				_, _ = sb.Write(lineBytes)
+			}
+
+			line := sb.String()
+		}
+	}
+
+	return nil, false, nil
+}
 
 func parseDiff(input *bufio.Reader, currentCommit *Commit, maxFiles int, maxBytes int) error {
 	line, err := input.ReadString('\n')
