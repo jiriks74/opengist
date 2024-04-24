@@ -63,7 +63,138 @@ func truncateCommandOutput(out io.Reader, maxBytes int64) (string, bool, error) 
 	return string(buf), truncated, nil
 }
 
-func parseLog(out io.Reader, maxBytes int) []*Commit {
+func parseLog(out io.Reader, maxFiles int, maxBytes int) ([]*Commit, error) {
+	var commits []*Commit
+	var currentCommit *Commit
+	input := bufio.NewReaderSize(out, maxBytes)
+
+	// Loop Commits
+loopCommits:
+	for {
+		line, err := input.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break loopCommits
+			}
+			return commits, err
+		}
+		if len(line) > 0 && (line[len(line)-1] == '\n' || line[len(line)-1] == '\r') {
+			line = line[:len(line)-1]
+		}
+
+		// Attempt to parse commit header (hash, author, mail, timestamp) or a diff
+		switch line[0] {
+		// Commit hash
+		case 'c':
+			currentCommit = &Commit{Hash: line[2:], Files: []File{}}
+			continue
+
+		// Author name
+		case 'a':
+			currentCommit.AuthorName = line[2:]
+			continue
+
+		// Author email
+		case 'm':
+			currentCommit.AuthorEmail = line[2:]
+			continue
+
+		// Commit timestamp
+		case 't':
+			currentCommit.Timestamp = line[2:]
+			continue
+
+		// Commit diff
+		default:
+
+			// Loop files in diff
+		loopDiff:
+			for {
+				// If the diff header is not present: invalid commit
+				if !strings.HasPrefix(line, "diff --git") {
+					return commits, fmt.Errorf("unexpected line in diff: %s for commit %s", line, currentCommit.Hash)
+				}
+
+				if maxFiles > -1 && len(currentCommit.Files) >= maxFiles {
+					// TODO: show that not every files were parsed
+					_, _ = io.Copy(io.Discard, input)
+					break loopDiff
+				}
+				currentFile := &File{}
+
+			currFileLoop:
+				for {
+					parseRename := true
+					line, err = input.ReadString('\n')
+					if err != nil {
+						if err != io.EOF {
+							return commits, err
+						}
+						break loopDiff
+					}
+					switch {
+					case strings.HasPrefix(line, "diff --git"):
+						break loopDiff
+					case strings.HasPrefix(line, "old mode"):
+					case strings.HasPrefix(line, "new mode"):
+					case strings.HasPrefix(line, "index"):
+					case strings.HasPrefix(line, "similarity index"):
+					case strings.HasPrefix(line, "dissimilarity index"):
+						continue
+					case strings.HasPrefix(line, "rename from "):
+						currentFile.OldFilename = line[11:]
+					case strings.HasPrefix(line, "rename to "):
+						currentFile.Filename = line[9:]
+						parseRename = false
+					case strings.HasPrefix(line, "copy from "):
+						currentFile.OldFilename = line[9:]
+					case strings.HasPrefix(line, "copy to "):
+						currentFile.Filename = line[7:]
+						parseRename = false
+					case strings.HasPrefix(line, "new file"):
+						currentFile.IsCreated = true
+					case strings.HasPrefix(line, "deleted file"):
+						currentFile.IsDeleted = true
+					case strings.HasPrefix(line, "--- "):
+						name := line[4:]
+						if parseRename && strings.HasPrefix(name, "a/") {
+							currentFile.OldFilename = name[2:]
+						} else if parseRename && currentFile.IsDeleted {
+							currentFile.Filename = name[2:]
+						}
+					case strings.HasPrefix(line, "+++ "):
+						name := line[4:]
+						if parseRename && strings.HasPrefix(name, "b/") {
+							currentFile.Filename = name[2:]
+						}
+					}
+
+					// header is finally parsed
+
+				}
+			}
+			commits = append(commits, currentCommit)
+		}
+	}
+
+	return commits, nil
+}
+
+func parseHunks()
+
+func parseDiff(input *bufio.Reader, currentCommit *Commit, maxFiles int, maxBytes int) error {
+	line, err := input.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	if len(line) > 0 && (line[len(line)-1] == '\n' || line[len(line)-1] == '\r') {
+		line = line[:len(line)-1]
+	}
+
+	return nil
+}
+
+func parseLog2(out io.Reader, maxBytes int) []*Commit {
 	reader := bufio.NewReader(out)
 
 	var commits []*Commit

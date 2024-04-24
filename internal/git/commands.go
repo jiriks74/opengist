@@ -24,6 +24,7 @@ var (
 )
 
 const truncateLimit = 2 << 18
+const diffBufferSize = 2 << 11
 
 type RevisionNotFoundError struct{}
 
@@ -313,7 +314,7 @@ func GetLog(user string, gist string, skip int) ([]*Commit, error) {
 		}
 	}(cmd)
 
-	return parseLog(stdout, truncateLimit), err
+	return parseLog(stdout, 2, 64)
 }
 
 func CloneTmp(user string, gist string, gistTmpId string, email string, remove bool) error {
