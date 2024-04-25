@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"encoding/csv"
 	"fmt"
+	"github.com/rs/zerolog/log"
 	"io"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -63,6 +65,10 @@ func truncateCommandOutput(out io.Reader, maxBytes int64) (string, bool, error) 
 	return string(buf), truncated, nil
 }
 
+// todo:
+// - shortstat
+// - disable empty commit (in git counts log etc)
+// - lines max/bytes max by line
 func parseLog(out io.Reader, maxFiles int, maxBytes int) ([]*Commit, error) {
 	var commits []*Commit
 	var currentCommit *Commit
@@ -106,17 +112,12 @@ loopCommits:
 
 		// Commit diff
 		default:
-
+			sb := strings.Builder{}
 			// Loop files in diff
 		loopDiff:
 			for {
-				// If the diff header is not present: invalid commit
-				if !strings.HasPrefix(line, "diff --git") {
-					return commits, fmt.Errorf("unexpected line in diff: %s for commit %s", line, currentCommit.Hash)
-				}
 
 				if maxFiles > -1 && len(currentCommit.Files) >= maxFiles {
-					// TODO: show that not every files were parsed
 					_, _ = io.Copy(io.Discard, input)
 					break loopDiff
 				}
@@ -132,6 +133,12 @@ loopCommits:
 						}
 						break loopDiff
 					}
+
+					if line == "\n" {
+						currentCommit.Files = append(currentCommit.Files, *currentFile)
+						break loopDiff
+					}
+
 					switch {
 					case strings.HasPrefix(line, "diff --git"):
 						break currFileLoop
@@ -167,25 +174,52 @@ loopCommits:
 						if parseRename && strings.HasPrefix(name, "b/") {
 							currentFile.Filename = name[2:]
 						}
+
+						// header is finally parsed
+
+						lineBytes, isFragment, err := parseHunks(currentFile, maxBytes, input)
+						if err != nil {
+							if err != io.EOF {
+								return commits, err
+							}
+							// EOF, we are done with this file
+							currentCommit.Files = append(currentCommit.Files, *currentFile)
+							break loopDiff
+						}
+						currentCommit.Files = append(currentCommit.Files, *currentFile)
+						sb.Reset()
+						_, _ = sb.Write(lineBytes)
+
+						if string(lineBytes) == "" {
+							break loopDiff
+						}
+
+						for isFragment {
+							lineBytes, isFragment, err = input.ReadLine()
+							if err != nil {
+								// Now by the definition of ReadLine this cannot be io.EOF
+								return commits, fmt.Errorf("unable to ReadLine: %w", err)
+							}
+							_, _ = sb.Write(lineBytes)
+
+						}
+						line = sb.String()
+
+						sb.Reset()
+						break currFileLoop
 					}
-
-					// header is finally parsed
-
 				}
 			}
-			commits = append(commits, currentCommit)
 		}
+		commits = append(commits, currentCommit)
 	}
 
 	return commits, nil
 }
 
-func parseHunks(currentFile *File, maxLines, maxBytes int, input *bufio.Reader) (lineBytes []byte, isFragment bool, err error) {
+func parseHunks(currentFile *File, maxBytes int, input *bufio.Reader) (lineBytes []byte, isFragment bool, err error) {
 	sb := &strings.Builder{}
 	var currFileLineCount int
-
-	lastLeftIdx := -1
-	leftLine, rightLine := 1, 1
 
 	for {
 		for isFragment {
@@ -208,31 +242,60 @@ func parseHunks(currentFile *File, maxLines, maxBytes int, input *bufio.Reader) 
 			}
 			return nil, false, err
 		}
+
+		if len(lineBytes) == 0 {
+			return lineBytes, false, err
+		}
 		if lineBytes[0] == 'd' {
+			// End of hunks
 			return lineBytes, isFragment, err
 		}
 
-		switch lineBytes[0] {
-		case '@':
-			if maxLines > -1 && currFileLineCount >= maxLines {
-				currentFile.Truncated = true
-				continue
-			}
+		if maxBytes > -1 && currFileLineCount >= maxBytes {
+			currentFile.Truncated = true
+			continue
+		}
 
-			_, _ = sb.Write(lineBytes)
+		line := string(lineBytes)
+		if isFragment {
+			currentFile.Truncated = true
 			for isFragment {
 				lineBytes, isFragment, err = input.ReadLine()
 				if err != nil {
-					return nil, false, err
+					// Now by the definition of ReadLine this cannot be io.EOF
+					return lineBytes, isFragment, fmt.Errorf("unable to ReadLine: %w", err)
 				}
-				_, _ = sb.Write(lineBytes)
 			}
-
-			line := sb.String()
 		}
+		if false {
+			//if len(line) > maxBytes {
+			currentFile.Truncated = true
+			line = line[:maxBytes]
+		}
+		currentFile.Content += line + "\n"
 	}
+}
 
-	return nil, false, nil
+func ParseDiffHunkString(diffhunk string) (leftLine, leftHunk, rightLine, righHunk int) {
+	ss := strings.Split(diffhunk, "@@")
+	ranges := strings.Split(ss[1][1:], " ")
+	leftRange := strings.Split(ranges[0], ",")
+	leftLine, _ = strconv.Atoi(leftRange[0][1:])
+	if len(leftRange) > 1 {
+		leftHunk, _ = strconv.Atoi(leftRange[1])
+	}
+	if len(ranges) > 1 {
+		rightRange := strings.Split(ranges[1], ",")
+		rightLine, _ = strconv.Atoi(rightRange[0])
+		if len(rightRange) > 1 {
+			righHunk, _ = strconv.Atoi(rightRange[1])
+		}
+	} else {
+		log.Debug().Msgf("Parse line number failed: %v", diffhunk)
+		rightLine = leftLine
+		righHunk = leftHunk
+	}
+	return leftLine, leftHunk, rightLine, righHunk
 }
 
 func parseDiff(input *bufio.Reader, currentCommit *Commit, maxFiles int, maxBytes int) error {

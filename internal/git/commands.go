@@ -298,7 +298,7 @@ func GetLog(user string, gist string, skip int) ([]*Commit, error) {
 		"--skip",
 		strconv.Itoa(skip),
 		"--format=format:c %H%na %aN%nm %ae%nt %at",
-		"--shortstat",
+		//"--shortstat",
 		"HEAD",
 	)
 	cmd.Dir = repositoryPath
@@ -314,7 +314,7 @@ func GetLog(user string, gist string, skip int) ([]*Commit, error) {
 		}
 	}(cmd)
 
-	return parseLog(stdout, 2, 64)
+	return parseLog(stdout, 2, 8192)
 }
 
 func CloneTmp(user string, gist string, gistTmpId string, email string, remove bool) error {
