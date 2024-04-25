@@ -72,6 +72,7 @@ func truncateCommandOutput(out io.Reader, maxBytes int64) (string, bool, error) 
 func parseLog(out io.Reader, maxFiles int, maxBytes int) ([]*Commit, error) {
 	var commits []*Commit
 	var currentCommit *Commit
+	var headerParsed = false
 	input := bufio.NewReaderSize(out, maxBytes)
 
 	// Loop Commits
@@ -92,11 +93,15 @@ loopCommits:
 		switch line[0] {
 		// Commit hash
 		case 'c':
+			if headerParsed {
+				commits = append(commits, currentCommit)
+			}
 			currentCommit = &Commit{Hash: line[2:], Files: []File{}}
 			continue
 
 		// Author name
 		case 'a':
+			headerParsed = true
 			currentCommit.AuthorName = line[2:]
 			continue
 
@@ -119,23 +124,25 @@ loopCommits:
 
 				if maxFiles > -1 && len(currentCommit.Files) >= maxFiles {
 					_, _ = io.Copy(io.Discard, input)
+					headerParsed = false
 					break loopDiff
 				}
 				currentFile := &File{}
+				parseRename := true
 
 			currFileLoop:
 				for {
-					parseRename := true
 					line, err = input.ReadString('\n')
 					if err != nil {
 						if err != io.EOF {
 							return commits, err
 						}
+						headerParsed = false
 						break loopDiff
 					}
-
 					if line == "\n" {
 						currentCommit.Files = append(currentCommit.Files, *currentFile)
+						headerParsed = false
 						break loopDiff
 					}
 
@@ -149,28 +156,28 @@ loopCommits:
 					case strings.HasPrefix(line, "dissimilarity index"):
 						continue
 					case strings.HasPrefix(line, "rename from "):
-						currentFile.OldFilename = line[11:]
+						currentFile.OldFilename = line[11 : len(line)-1]
 					case strings.HasPrefix(line, "rename to "):
-						currentFile.Filename = line[9:]
+						currentFile.Filename = line[9 : len(line)-1]
 						parseRename = false
 					case strings.HasPrefix(line, "copy from "):
-						currentFile.OldFilename = line[9:]
+						currentFile.OldFilename = line[9 : len(line)-1]
 					case strings.HasPrefix(line, "copy to "):
-						currentFile.Filename = line[7:]
+						currentFile.Filename = line[7 : len(line)-1]
 						parseRename = false
 					case strings.HasPrefix(line, "new file"):
 						currentFile.IsCreated = true
 					case strings.HasPrefix(line, "deleted file"):
 						currentFile.IsDeleted = true
 					case strings.HasPrefix(line, "--- "):
-						name := line[4:]
-						if parseRename && strings.HasPrefix(name, "a/") {
-							currentFile.OldFilename = name[2:]
-						} else if parseRename && currentFile.IsDeleted {
+						name := line[4 : len(line)-1]
+						if parseRename && currentFile.IsDeleted {
 							currentFile.Filename = name[2:]
+						} else if parseRename && strings.HasPrefix(name, "a/") {
+							currentFile.OldFilename = name[2:]
 						}
 					case strings.HasPrefix(line, "+++ "):
-						name := line[4:]
+						name := line[4 : len(line)-1]
 						if parseRename && strings.HasPrefix(name, "b/") {
 							currentFile.Filename = name[2:]
 						}
@@ -184,13 +191,16 @@ loopCommits:
 							}
 							// EOF, we are done with this file
 							currentCommit.Files = append(currentCommit.Files, *currentFile)
+							headerParsed = false
 							break loopDiff
 						}
 						currentCommit.Files = append(currentCommit.Files, *currentFile)
 						sb.Reset()
 						_, _ = sb.Write(lineBytes)
 
+						fmt.Print("linebytes#" + string(lineBytes) + "#\n")
 						if string(lineBytes) == "" {
+							headerParsed = false
 							break loopDiff
 						}
 
