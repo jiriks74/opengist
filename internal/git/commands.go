@@ -25,6 +25,7 @@ var (
 
 const truncateLimit = 2 << 18
 const diffSize = 2 << 12
+const maxFilesPerDiffCommit = 10
 
 type RevisionNotFoundError struct{}
 
@@ -314,8 +315,7 @@ func GetLog(user string, gist string, skip int) ([]*Commit, error) {
 		}
 	}(cmd)
 
-	// 10 files per commit
-	return parseLog(stdout, 10, diffSize)
+	return parseLog(stdout, maxFilesPerDiffCommit, diffSize)
 }
 
 func CloneTmp(user string, gist string, gistTmpId string, email string, remove bool) error {

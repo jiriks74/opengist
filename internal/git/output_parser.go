@@ -62,8 +62,7 @@ func truncateCommandOutput(out io.Reader, maxBytes int64) (string, bool, error) 
 	return string(buf), truncated, nil
 }
 
-// todo:
-// - shortstat
+// inspired from https://github.com/go-gitea/gitea/blob/main/services/gitdiff/gitdiff.go
 func parseLog(out io.Reader, maxFiles int, maxBytes int) ([]*Commit, error) {
 	var commits []*Commit
 	var currentCommit *Commit
@@ -289,17 +288,16 @@ func parseDiffContent(currentFile *File, maxBytes int, input *bufio.Reader) (lin
 			return nil, false, err
 		}
 
+		// End of file
 		if len(lineBytes) == 0 {
 			return lineBytes, false, err
 		}
 		if lineBytes[0] == 'd' {
-			// End of hunks
 			return lineBytes, false, err
 		}
 
 		if currFileLineCount >= maxBytes {
 			currentFile.Truncated = true
-
 			continue
 		}
 
@@ -309,11 +307,11 @@ func parseDiffContent(currentFile *File, maxBytes int, input *bufio.Reader) (lin
 			for isFragment {
 				lineBytes, isFragment, err = input.ReadLine()
 				if err != nil {
-					// Now by the definition of ReadLine this cannot be io.EOF
 					return lineBytes, isFragment, fmt.Errorf("unable to ReadLine: %w", err)
 				}
 			}
 		}
+
 		if len(line) > maxBytes {
 			currentFile.Truncated = true
 			line = line[:maxBytes]
