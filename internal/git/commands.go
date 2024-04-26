@@ -24,7 +24,7 @@ var (
 )
 
 const truncateLimit = 2 << 18
-const diffBufferSize = 2 << 11
+const diffSize = 2 << 12
 
 type RevisionNotFoundError struct{}
 
@@ -298,7 +298,7 @@ func GetLog(user string, gist string, skip int) ([]*Commit, error) {
 		"--skip",
 		strconv.Itoa(skip),
 		"--format=format:c %H%na %aN%nm %ae%nt %at",
-		//"--shortstat",
+		"--shortstat",
 		"HEAD",
 	)
 	cmd.Dir = repositoryPath
@@ -314,7 +314,8 @@ func GetLog(user string, gist string, skip int) ([]*Commit, error) {
 		}
 	}(cmd)
 
-	return parseLog(stdout, 2, 8192)
+	// 10 files per commit
+	return parseLog(stdout, 10, diffSize)
 }
 
 func CloneTmp(user string, gist string, gistTmpId string, email string, remove bool) error {

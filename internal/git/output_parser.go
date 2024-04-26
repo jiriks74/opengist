@@ -5,10 +5,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"fmt"
-	"github.com/rs/zerolog/log"
 	"io"
-	"regexp"
-	"strconv"
 	"strings"
 )
 
@@ -67,24 +64,32 @@ func truncateCommandOutput(out io.Reader, maxBytes int64) (string, bool, error) 
 
 // todo:
 // - shortstat
-// - disable empty commit (in git counts log etc)
-// - lines max/bytes max by line
 func parseLog(out io.Reader, maxFiles int, maxBytes int) ([]*Commit, error) {
 	var commits []*Commit
 	var currentCommit *Commit
+	var currentFile *File
 	var headerParsed = false
+	var skipped = false
+	var line string
+	var err error
+
 	input := bufio.NewReaderSize(out, maxBytes)
 
 	// Loop Commits
-loopCommits:
+loopLog:
 	for {
-		line, err := input.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				break loopCommits
+		// If a commit was skipped, do not read a new line
+		if !skipped {
+			line, err = input.ReadString('\n')
+			if err != nil {
+				if err == io.EOF {
+					break loopLog
+				}
+				return commits, err
 			}
-			return commits, err
 		}
+
+		// Remove trailing newline characters
 		if len(line) > 0 && (line[len(line)-1] == '\n' || line[len(line)-1] == '\r') {
 			line = line[:len(line)-1]
 		}
@@ -96,6 +101,7 @@ loopCommits:
 			if headerParsed {
 				commits = append(commits, currentCommit)
 			}
+			skipped = false
 			currentCommit = &Commit{Hash: line[2:], Files: []File{}}
 			continue
 
@@ -115,22 +121,49 @@ loopCommits:
 			currentCommit.Timestamp = line[2:]
 			continue
 
+		// Commit shortstat
+		case ' ':
+			changed := []byte(line)[1:]
+			changed = bytes.ReplaceAll(changed, []byte("(+)"), []byte(""))
+			changed = bytes.ReplaceAll(changed, []byte("(-)"), []byte(""))
+			currentCommit.Changed = string(changed)
+
+			// shortstat is followed by an empty line
+			line, err = input.ReadString('\n')
+			if err != nil {
+				if err == io.EOF {
+					break loopLog
+				}
+				return commits, err
+			}
+			continue
+
 		// Commit diff
 		default:
-			sb := strings.Builder{}
 			// Loop files in diff
-		loopDiff:
+		loopCommit:
 			for {
+				// If we have reached the maximum number of files to show for a single commit, skip to the next commit
+				if len(currentCommit.Files) >= maxFiles {
+					line, err = skipToNextCommit(input)
+					if err != nil {
+						if err == io.EOF {
+							break loopLog
+						}
+						return commits, err
+					}
 
-				if maxFiles > -1 && len(currentCommit.Files) >= maxFiles {
-					_, _ = io.Copy(io.Discard, input)
+					// Skip to the next commit
 					headerParsed = false
-					break loopDiff
+					skipped = true
+					break loopCommit
 				}
-				currentFile := &File{}
+
+				// Else create a new file and parse it
+				currentFile = &File{}
 				parseRename := true
 
-			currFileLoop:
+			loopFileDiff:
 				for {
 					line, err = input.ReadString('\n')
 					if err != nil {
@@ -138,17 +171,20 @@ loopCommits:
 							return commits, err
 						}
 						headerParsed = false
-						break loopDiff
+						break loopCommit
 					}
+
+					// If the line is a newline character, the commit is finished
 					if line == "\n" {
 						currentCommit.Files = append(currentCommit.Files, *currentFile)
 						headerParsed = false
-						break loopDiff
+						break loopCommit
 					}
 
+					// Attempt to parse the file header
 					switch {
 					case strings.HasPrefix(line, "diff --git"):
-						break currFileLoop
+						break loopFileDiff
 					case strings.HasPrefix(line, "old mode"):
 					case strings.HasPrefix(line, "new mode"):
 					case strings.HasPrefix(line, "index"):
@@ -182,41 +218,41 @@ loopCommits:
 							currentFile.Filename = name[2:]
 						}
 
-						// header is finally parsed
-
-						lineBytes, isFragment, err := parseHunks(currentFile, maxBytes, input)
+						sb := &strings.Builder{}
+						// Header is finally parsed, now we can parse the file diff content
+						lineBytes, isFragment, err := parseDiffContent(currentFile, maxBytes, input)
 						if err != nil {
 							if err != io.EOF {
 								return commits, err
 							}
-							// EOF, we are done with this file
+
+							// EOF reached, commit is finished
 							currentCommit.Files = append(currentCommit.Files, *currentFile)
 							headerParsed = false
-							break loopDiff
+							break loopCommit
 						}
-						currentCommit.Files = append(currentCommit.Files, *currentFile)
+
 						sb.Reset()
 						_, _ = sb.Write(lineBytes)
 
-						fmt.Print("linebytes#" + string(lineBytes) + "#\n")
+						currentCommit.Files = append(currentCommit.Files, *currentFile)
+
 						if string(lineBytes) == "" {
 							headerParsed = false
-							break loopDiff
+							break loopCommit
 						}
 
 						for isFragment {
 							lineBytes, isFragment, err = input.ReadLine()
 							if err != nil {
-								// Now by the definition of ReadLine this cannot be io.EOF
 								return commits, fmt.Errorf("unable to ReadLine: %w", err)
 							}
 							_, _ = sb.Write(lineBytes)
-
 						}
-						line = sb.String()
 
+						line = sb.String()
 						sb.Reset()
-						break currFileLoop
+						break loopFileDiff
 					}
 				}
 			}
@@ -227,7 +263,7 @@ loopCommits:
 	return commits, nil
 }
 
-func parseHunks(currentFile *File, maxBytes int, input *bufio.Reader) (lineBytes []byte, isFragment bool, err error) {
+func parseDiffContent(currentFile *File, maxBytes int, input *bufio.Reader) (lineBytes []byte, isFragment bool, err error) {
 	sb := &strings.Builder{}
 	var currFileLineCount int
 
@@ -248,7 +284,7 @@ func parseHunks(currentFile *File, maxBytes int, input *bufio.Reader) (lineBytes
 		lineBytes, isFragment, err = input.ReadLine()
 		if err != nil {
 			if err == io.EOF {
-				return lineBytes, false, err
+				return lineBytes, isFragment, err
 			}
 			return nil, false, err
 		}
@@ -258,11 +294,12 @@ func parseHunks(currentFile *File, maxBytes int, input *bufio.Reader) (lineBytes
 		}
 		if lineBytes[0] == 'd' {
 			// End of hunks
-			return lineBytes, isFragment, err
+			return lineBytes, false, err
 		}
 
-		if maxBytes > -1 && currFileLineCount >= maxBytes {
+		if currFileLineCount >= maxBytes {
 			currentFile.Truncated = true
+
 			continue
 		}
 
@@ -277,8 +314,7 @@ func parseHunks(currentFile *File, maxBytes int, input *bufio.Reader) (lineBytes
 				}
 			}
 		}
-		if false {
-			//if len(line) > maxBytes {
+		if len(line) > maxBytes {
 			currentFile.Truncated = true
 			line = line[:maxBytes]
 		}
@@ -286,174 +322,34 @@ func parseHunks(currentFile *File, maxBytes int, input *bufio.Reader) (lineBytes
 	}
 }
 
-func ParseDiffHunkString(diffhunk string) (leftLine, leftHunk, rightLine, righHunk int) {
-	ss := strings.Split(diffhunk, "@@")
-	ranges := strings.Split(ss[1][1:], " ")
-	leftRange := strings.Split(ranges[0], ",")
-	leftLine, _ = strconv.Atoi(leftRange[0][1:])
-	if len(leftRange) > 1 {
-		leftHunk, _ = strconv.Atoi(leftRange[1])
-	}
-	if len(ranges) > 1 {
-		rightRange := strings.Split(ranges[1], ",")
-		rightLine, _ = strconv.Atoi(rightRange[0])
-		if len(rightRange) > 1 {
-			righHunk, _ = strconv.Atoi(rightRange[1])
-		}
-	} else {
-		log.Debug().Msgf("Parse line number failed: %v", diffhunk)
-		rightLine = leftLine
-		righHunk = leftHunk
-	}
-	return leftLine, leftHunk, rightLine, righHunk
-}
-
-func parseDiff(input *bufio.Reader, currentCommit *Commit, maxFiles int, maxBytes int) error {
-	line, err := input.ReadString('\n')
-	if err != nil {
-		return err
-	}
-	if len(line) > 0 && (line[len(line)-1] == '\n' || line[len(line)-1] == '\r') {
-		line = line[:len(line)-1]
-	}
-
-	return nil
-}
-
-func parseLog2(out io.Reader, maxBytes int) []*Commit {
-	reader := bufio.NewReader(out)
-
-	var commits []*Commit
-	var currentCommit *Commit
-	var currentFile *File
-	var isContent bool
-	var bytesRead = 0
-	scanNext := true
-
+func skipToNextCommit(input *bufio.Reader) (line string, err error) {
+	// need to skip until the next cmdDiffHead
+	var isFragment, wasFragment bool
+	var lineBytes []byte
 	for {
-		line, err := reader.ReadString('\n')
-		if scanNext && err == io.EOF {
-			break
+		lineBytes, isFragment, err = input.ReadLine()
+		if err != nil {
+			return "", err
 		}
-		scanNext = true
-
-		// new commit found
-		currentFile = nil
-		currentCommit = &Commit{Hash: line[2:], Files: []File{}}
-
-		line, _ = reader.ReadString('\n')
-		line = line[:len(line)-1]
-		currentCommit.AuthorName = line[2:]
-
-		line, _ = reader.ReadString('\n')
-		line = line[:len(line)-1]
-		currentCommit.AuthorEmail = line[2:]
-
-		line, _ = reader.ReadString('\n')
-		line = line[:len(line)-1]
-		currentCommit.Timestamp = line[2:]
-
-		line, _ = reader.ReadString('\n')
-		line = line[:len(line)-1]
-		if line == "" {
-			commits = append(commits, currentCommit)
-			break
-		}
-
-		// if there is no shortstat, it means that the commit is empty, we add it and move onto the next one
-		if line[0] != ' ' {
-			commits = append(commits, currentCommit)
-
-			// avoid scanning the next line, as we already did it
-			scanNext = false
+		if wasFragment {
+			wasFragment = isFragment
 			continue
 		}
-
-		changed := []byte(line)[1:]
-		changed = bytes.ReplaceAll(changed, []byte("(+)"), []byte(""))
-		changed = bytes.ReplaceAll(changed, []byte("(-)"), []byte(""))
-		currentCommit.Changed = string(changed)
-
-		// twice because --shortstat adds a new line
-		line, _ = reader.ReadString('\n')
-		line = line[:len(line)-1]
-		line, _ = reader.ReadString('\n')
-		line = line[:len(line)-1]
-
-		// commit header parsed
-
-		// files changes inside the commit
-		for {
-			// line := reader.Bytes()
-
-			// end of content of file
-			if len(line) == 0 {
-				isContent = false
-				if currentFile != nil {
-					currentCommit.Files = append(currentCommit.Files, *currentFile)
-				}
-				break
-			}
-
-			// new file found
-			if bytes.HasPrefix([]byte(line), []byte("diff --git")) {
-				// current file is finished, we can add it to the commit
-				if currentFile != nil {
-					currentCommit.Files = append(currentCommit.Files, *currentFile)
-				}
-
-				// create a new file
-				isContent = false
-				bytesRead = 0
-				currentFile = &File{}
-				filenameRegex := regexp.MustCompile(`^diff --git a/(.+) b/(.+)$`)
-				matches := filenameRegex.FindStringSubmatch(string(line))
-				if len(matches) == 3 {
-					currentFile.Filename = matches[2]
-					if matches[1] != matches[2] {
-						currentFile.OldFilename = matches[1]
-					}
-				}
-				line, _ = reader.ReadString('\n')
-				line = line[:len(line)-1]
-				continue
-			}
-
-			if bytes.HasPrefix([]byte(line), []byte("new")) {
-				currentFile.IsCreated = true
-			}
-
-			if bytes.HasPrefix([]byte(line), []byte("deleted")) {
-				currentFile.IsDeleted = true
-			}
-
-			// file content found
-			if line[0] == '@' {
-				isContent = true
-			}
-
-			if isContent {
-				currentFile.Content += string(line) + "\n"
-
-				bytesRead += len(line)
-				if bytesRead > maxBytes {
-					currentFile.Truncated = true
-					currentFile.Content = ""
-					isContent = false
-				}
-			}
-
-			line, _ = reader.ReadString('\n')
-			if len(line) > 0 && (line[len(line)-1] == '\n' || line[len(line)-1] == '\r') {
-				line = line[:len(line)-1]
-			}
+		if bytes.HasPrefix(lineBytes, []byte("c")) {
+			break
 		}
-
-		commits = append(commits, currentCommit)
-
+		wasFragment = isFragment
 	}
-
-	return commits
+	line = string(lineBytes)
+	if isFragment {
+		var tail string
+		tail, err = input.ReadString('\n')
+		if err != nil {
+			return "", err
+		}
+		line += tail
+	}
+	return line, err
 }
 
 func ParseCsv(file *File) (*CsvFile, error) {
